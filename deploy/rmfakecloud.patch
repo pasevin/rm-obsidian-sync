@@ -1,0 +1,85 @@
+diff --git a/internal/app/handlers.go b/internal/app/handlers.go
+index 7404d7b..cb9a880 100644
+--- a/internal/app/handlers.go
++++ b/internal/app/handlers.go
+@@ -181,7 +181,10 @@ func (app *App) newUserToken(c *gin.Context) {
+ 	jti = append(jti, '/', 'E')
+ 
+ 	now := time.Now()
+-	expirationTime := now.Add(3 * time.Hour)
++	// 30-day TTL: xochitl does not auto-refresh user tokens on 401,
++	// so a short TTL causes repeated "cloud with cross" disconnects
++	// until the tablet is manually re-paired via USB.
++	expirationTime := now.Add(30 * 24 * time.Hour)
+ 	claims := &UserClaims{
+ 		Profile: Auth0profile{
+ 			UserID:        deviceToken.UserID,
+diff --git a/internal/common/common.go b/internal/common/common.go
+index 8d7dd38..1f5cbcd 100644
+--- a/internal/common/common.go
++++ b/internal/common/common.go
+@@ -10,6 +10,7 @@ import (
+ 	"path/filepath"
+ 	"regexp"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/golang-jwt/jwt/v4"
+@@ -33,14 +34,50 @@ func GetToken(c *gin.Context) (string, error) {
+ 
+ }
+ 
+-// ClaimsFromToken parses the claims from the token
++// ClaimsFromToken parses the claims from the token.
++// A 30-day expiry leeway is applied: golang-jwt/v4 does not have
++// WithLeeway (that is v5), and xochitl never proactively refreshes
++// its user token — so strict expiry causes permanent "cloud with cross"
++// disconnects after every container restart until the tablet is
++// USB-re-paired. On a self-hosted single-user server the trade-off
++// is acceptable; signature verification (HMAC-SHA256) is still enforced.
+ func ClaimsFromToken(claim jwt.Claims, token string, key []byte) error {
+-	_, err := jwt.ParseWithClaims(token, claim,
+-		func(token *jwt.Token) (interface{}, error) {
+-			return key, nil
+-		}, jwt.WithValidMethods([]string{signingMethod.Name}))
++	p := jwt.NewParser(jwt.WithValidMethods([]string{signingMethod.Name}))
++	// Skip built-in expiry check so we can apply our own leeway below.
++	p.SkipClaimsValidation = true
++
++	_, err := p.ParseWithClaims(token, claim, func(t *jwt.Token) (interface{}, error) {
++		return key, nil
++	})
++	if err != nil {
++		return err
++	}
++
++	// Manual expiry check with 30-day leeway.
++	if sc, ok := claim.(interface{ Valid() error }); ok {
++		// Re-validate via standard path but catch only expiry errors.
++		if vErr := sc.Valid(); vErr != nil {
++			ve, isVE := vErr.(*jwt.ValidationError)
++			if !isVE {
++				return vErr
++			}
++			// Allow tokens that are expired by at most 30 days.
++			if ve.Errors&^jwt.ValidationErrorExpired != 0 {
++				return vErr // other validation failure — reject
++			}
++			// Expiry-only: check the raw exp field via MapClaims trick.
++			mc := jwt.MapClaims{}
++			if _, e2 := p.ParseWithClaims(token, mc, func(t *jwt.Token) (interface{}, error) {
++				return key, nil
++			}); e2 == nil {
++				if !mc.VerifyExpiresAt(time.Now().Add(-30*24*time.Hour).Unix(), true) {
++					return vErr // expired by more than 30 days — reject
++				}
++			}
++		}
++	}
+ 
+-	return err
++	return nil
+ }
+ 
+ // SignClaims signs the claims i.e. creates a token

@@ -1,0 +1,18 @@
+[Unit]
+Description=reMarkable ↔ Obsidian sync daemon
+After=network.target
+
+[Service]
+Type=simple
+# Adjust WorkingDirectory to wherever you cloned this repo.
+WorkingDirectory=%h/rm-obsidian-sync
+ExecStart=%h/rm-obsidian-sync/.venv/bin/uvicorn rm_sync.main:app --host 127.0.0.1 --port 9090
+EnvironmentFile=%h/rm-obsidian-sync/.env
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rm-obsidian-sync
+
+[Install]
+WantedBy=default.target
