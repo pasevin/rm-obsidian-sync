@@ -47,12 +47,15 @@ _MYSCRIPT_URL = "https://cloud.myscript.com/api/v4.0/iink/batch"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _TESSERACT_IMAGE = "tesseractshadow/tesseract4re"
 
-_HWR_PROMPT = (
-    "This is a handwritten note rendered from a reMarkable e-ink tablet. "
-    "Transcribe the exact handwritten text you see. "
-    "Output ONLY the transcribed text — no commentary, no quotation marks, "
-    "no explanation."
-)
+def _build_hwr_prompt(language: str) -> str:
+    """Return the LLM vision HWR prompt with the target language injected."""
+    return (
+        f"This is a handwritten note rendered from a reMarkable e-ink tablet. "
+        f"The text is written in {language}. "
+        f"Transcribe the exact handwritten text you see. "
+        f"Output ONLY the transcribed text in {language} — no commentary, no quotation marks, "
+        f"no explanation, no translation."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,14 +67,16 @@ async def _recognize_via_llm_vision(
     strokes: list[dict[str, Any]],
     model: str,
     api_key: str,
+    language: str = "English",
 ) -> str:
     """
     Render strokes to PNG and send to an OpenRouter vision model for HWR.
 
     Args:
-        strokes:  Stroke dicts from rm_parser.
-        model:    OpenRouter model ID (e.g. ``nvidia/nemotron-nano-12b-v2-vl:free``).
-        api_key:  OpenRouter API key.
+        strokes:   Stroke dicts from rm_parser.
+        model:     OpenRouter model ID (e.g. ``nvidia/nemotron-nano-12b-v2-vl:free``).
+        api_key:   OpenRouter API key.
+        language:  Natural-language name of the writing language (e.g. ``English``).
 
     Returns:
         Recognised text.
@@ -90,7 +95,7 @@ async def _recognize_via_llm_vision(
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                {"type": "text", "text": _HWR_PROMPT},
+                {"type": "text", "text": _build_hwr_prompt(language)},
             ],
         }],
         "max_tokens": 500,
@@ -231,14 +236,18 @@ async def recognize_page(
         logger.debug("No strokes on page — skipping HWR")
         return ""
 
-    _lang = lang or config.hwr_language or "en_US"
+    # HWR_LANGUAGE is a natural-language name (e.g. "English") — used in the
+    # LLM Vision prompt.  MyScript requires a BCP-47 tag (e.g. "en_US"), so
+    # fall back to the explicit lang parameter or a sensible default for it.
+    _lang_natural = config.hwr_language or "English"
+    _lang_bcp47   = lang or "en_US"     # caller passes BCP-47 if they know it
 
     # ── 1. LLM Vision ────────────────────────────────────────────────────
     _or_key = config.openrouter_api_key
     _model = config.llm_vision_model
     if _or_key and _model:
         try:
-            return await _recognize_via_llm_vision(strokes, _model, _or_key)
+            return await _recognize_via_llm_vision(strokes, _model, _or_key, language=_lang_natural)
         except Exception as exc:
             logger.warning("LLM Vision HWR failed — trying MyScript: %s", exc)
     else:
@@ -249,7 +258,7 @@ async def recognize_page(
     _hmac_key = hmac_key or config.myscript_hmac_key
     if _app_key and _hmac_key:
         try:
-            return await _recognize_via_myscript(strokes, _lang, _app_key, _hmac_key)
+            return await _recognize_via_myscript(strokes, _lang_bcp47, _app_key, _hmac_key)
         except Exception as exc:
             logger.warning("MyScript HWR failed — falling back to Tesseract: %s", exc)
     else:

@@ -92,9 +92,13 @@ class Config:
     """OpenRouter model ID used for LLM vision HWR.
     Default: ``nvidia/nemotron-nano-12b-v2-vl:free`` (free, excellent handwriting)."""
 
-    # ------------------------------------------------------------------ #
-    # HWR — MyScript (secondary fallback)
-    # ------------------------------------------------------------------ #
+    hwr_language: str = field(
+        default_factory=lambda: os.environ.get("HWR_LANGUAGE", "English")
+    )
+    """Natural language name of the handwriting language, injected into the LLM
+    vision prompt and used as the Tesseract ``-l`` locale.  Default: ``English``."""
+
+
     myscript_app_key: str = field(
         default_factory=lambda: os.environ.get("MYSCRIPT_APP_KEY", "")
     )
