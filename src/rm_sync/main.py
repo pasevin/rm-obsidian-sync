@@ -174,11 +174,21 @@ async def _poll_loop() -> None:
                 and d.get("type") == "notebook"
             ]
 
-            # Determine which notebooks to sync:
-            #   1. New doc — ID not in state or seeded set
-            #   2. Updated doc — lastModified advanced past its last synced_at
-            from rm_sync.vault_writer import load_state
+            # ── Deletion detection ────────────────────────────────────────────
+            # Any doc_id present in sync state but absent from the current
+            # listing was deleted on the tablet — remove it from the vault.
+            from rm_sync.vault_writer import load_state, delete_note
             current_state = load_state()
+            live_ids: set[str] = {d.get("id", "") for d in docs if d.get("id")}
+            deleted_ids = [
+                doc_id for doc_id in current_state
+                if doc_id not in live_ids
+            ]
+            for doc_id in deleted_ids:
+                logger.info("Poll: doc %s removed from tablet — deleting vault note", doc_id[:8])
+                delete_note(doc_id)
+
+            # ── New / updated detection ───────────────────────────────────────
             known_ids: set[str] = set(current_state.keys()) | _seeded_ids
             to_sync: list[dict] = []
 

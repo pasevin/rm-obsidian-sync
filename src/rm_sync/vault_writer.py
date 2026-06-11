@@ -201,8 +201,88 @@ def _resolve_unique_folder_name(base_dir: Path, name: str, doc_id: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Conflict detection
+# Deletion
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def delete_note(doc_id: str) -> bool:
+    """
+    Delete a previously-synced note from the vault and remove it from state.
+
+    Deletes the entire notebook directory (the ``.md`` file and the ``raw/``
+    subdirectory) that was created for *doc_id*.  If the note has been
+    manually edited in Obsidian since the last sync, it is moved to a
+    ``.deleted-<timestamp>`` backup directory instead of being removed, so
+    no user work is ever silently discarded.
+
+    Args:
+        doc_id: UUID of the document that was deleted on the tablet.
+
+    Returns:
+        ``True`` if the note was deleted (or backed up), ``False`` if the
+        doc_id was not found in state (nothing to do).
+    """
+    import shutil
+
+    state = load_state()
+    entry = state.get(doc_id)
+    if not entry:
+        logger.debug("delete_note: %s not in state — nothing to do", doc_id[:8])
+        return False
+
+    vault_path = Path(entry["vault_path"])      # the .md file
+    note_dir   = vault_path.parent              # the notebook subdirectory
+
+    if not note_dir.exists():
+        # Already gone from disk — just clean state
+        logger.info("delete_note: dir already absent for %s, cleaning state", doc_id[:8])
+        del state[doc_id]
+        save_state(state)
+        return True
+
+    # Check for post-sync manual edits in Obsidian — if so, back up instead
+    # of deleting so the user's work is preserved.
+    last_synced_str: str = entry.get("synced_at", "")
+    user_edited = False
+    if last_synced_str and vault_path.exists():
+        try:
+            last_synced = datetime.fromisoformat(last_synced_str)
+            mtime = datetime.fromtimestamp(vault_path.stat().st_mtime, tz=timezone.utc)
+            if mtime > last_synced:
+                user_edited = True
+        except (ValueError, OSError):
+            pass
+
+    if user_edited:
+        # Move to a timestamped backup rather than hard-delete
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        backup_dir = note_dir.parent / f"{note_dir.name}.deleted-{ts}"
+        try:
+            shutil.move(str(note_dir), str(backup_dir))
+            logger.info(
+                "delete_note: %s had post-sync edits — backed up to %s",
+                doc_id[:8], backup_dir.name,
+            )
+        except OSError as exc:
+            logger.error("delete_note: backup move failed for %s: %s", doc_id[:8], exc)
+            return False
+    else:
+        try:
+            shutil.rmtree(note_dir)
+            logger.info(
+                "delete_note: removed vault dir %s (doc %s deleted on tablet)",
+                note_dir, doc_id[:8],
+            )
+        except OSError as exc:
+            logger.error("delete_note: rmtree failed for %s: %s", note_dir, exc)
+            return False
+
+    del state[doc_id]
+    save_state(state)
+    return True
+
+
+
 
 
 def conflict_check(path: Path, doc_id: str) -> bool:
