@@ -32,6 +32,7 @@ Obsidian    Obsidian
 3. Each inked page rendered to PNG via a custom Cairo-based stroke renderer
 4. Handwriting recognised via **LLM vision** (OpenRouter, free tier) → Tesseract fallback
 5. Markdown note written to `<VAULT_RM_ROOT>/<Notebook Name>/` with embedded page images
+6. **Deletions propagate** — if a notebook is deleted on the tablet, the corresponding vault directory is removed on the next poll cycle (see [Deletion behaviour](#deletion-behaviour))
 
 ### Obsidian → reMarkable
 
@@ -235,6 +236,28 @@ rm_exclude: true
 ```
 
 Notes under `Inbox/reMarkable/` and `_templates/` are always excluded.
+
+---
+
+## Deletion behaviour
+
+When you delete a notebook on the tablet, the poll loop detects the missing document on the next cycle and removes the corresponding vault directory. There are two cases:
+
+**Note untouched in Obsidian since last sync → hard delete**
+```
+Delete on tablet → 60s poll → vault dir removed → state cleaned
+```
+
+**Note edited in Obsidian after last sync → safe backup**
+
+If the `.md` file has a newer `mtime` than the last `synced_at` timestamp, the entire notebook directory is **moved** to a timestamped backup next to where it lived, rather than deleted outright:
+
+```
+Inbox/reMarkable/My Note/          ← original (has post-sync edits)
+Inbox/reMarkable/My Note.deleted-20260611T113821/  ← backup
+```
+
+The backup directory does not appear in Obsidian's sidebar (it contains no `.md` file at the root level) but is fully recoverable from the filesystem.
 
 ---
 
