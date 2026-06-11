@@ -2,14 +2,14 @@
 stroke_renderer.py — Render reMarkable stroke data to a high-fidelity colour PNG.
 
 Converts the full-fidelity stroke dicts produced by rm_parser into a colour PNG
-that closely matches what you see on the reMarkable tablet:
+that closely matches what you see on the reMarkable Paper Pro tablet:
 
 - Correct RGB colour per stroke (black, grey, blue, red, yellow, …)
 - Semi-transparent highlight strokes (HIGHLIGHTER pen type)
 - Shader / pencil-shading approximation (semi-transparent wide strokes)
 - Pen-specific base widths (fineliner thin, marker wide, brush pressure-sensitive)
 - Per-point pressure × width modulation from tablet data
-- Full A4 canvas with correct origin translation (reMarkable coords are centred)
+- Full Paper Pro canvas (1620 × 2160 source units) with correct X-centring
 
 Public API
 ----------
@@ -28,27 +28,32 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Canvas — reMarkable coordinate space
+# Canvas — reMarkable Paper Pro coordinate space
 # ──────────────────────────────────────────────────────────────────────────────
-# The reMarkable Paper Pro native resolution is 1404 × 1872 px.
-# Stroke coordinates are centred: (0, 0) is roughly the top-centre of the page.
-# The full horizontal range is ±702 units; vertical is 0 → 1872 (mostly positive
-# but can go slightly negative for strokes near the top edge).
+# The reMarkable Paper Pro native resolution is 1620 × 2160 px (portrait).
 #
-# To map to pixel space we translate by half the canvas width on X, and by a
-# small top-margin offset on Y.  We also add padding so strokes near the edges
-# are never clipped.
+# Coordinate conventions (v6 .rm format, empirically verified):
+#   X: centred at 0  →  range is ±810 (full width = 1620 units)
+#   Y: top-relative  →  0 = top of page, 2160 = bottom of page.
+#      Some strokes go slightly negative (written near/above the top margin)
+#      or past 2160 (infinite-scroll pages).
+#
+# Mapping to pixel space:
+#   px = (x + X_ORIGIN + padding) * scale      (X_ORIGIN = 810 centres the axis)
+#   py = (y            + padding) * scale      (Y is already top-relative)
+#
+# Padding of 100 source units on all sides ensures strokes near/past the edges
+# are never clipped in the output image.
 
-_RM_WIDTH:   int = 1404   # native canvas width  (source units)
-_RM_HEIGHT:  int = 1872   # native canvas height (source units)
-_PADDING:    int = 50     # extra padding on all sides (source units)
-_DEFAULT_SCALE: float = 2.0
+_RM_WIDTH:   int = 1620   # Paper Pro native canvas width  (source units)
+_RM_HEIGHT:  int = 2160   # Paper Pro native canvas height (source units)
+_PADDING:    int = 100    # extra bleed on all sides (source units)
+_DEFAULT_SCALE: float = 1.5
 
-# X origin: coordinates are centred, so 0 maps to the horizontal midpoint
-_X_ORIGIN: float = _RM_WIDTH / 2.0       # 702.0
-# Y origin: (0,0) is near the top of the page; a small positive offset covers
-# strokes with slightly negative Y (headers, menu areas).
-_Y_ORIGIN: float = 0.0   # Y is already top-relative in v6 format
+# X is centred — translate by half the canvas width so centre maps to centre
+_X_ORIGIN: float = _RM_WIDTH / 2.0       # 810.0
+# Y is top-relative — no translation needed; padding handles negative Y values
+_Y_ORIGIN: float = 0.0
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-tool rendering parameters
