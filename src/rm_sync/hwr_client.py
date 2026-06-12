@@ -48,13 +48,29 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _TESSERACT_IMAGE = "tesseractshadow/tesseract4re"
 
 def _build_hwr_prompt(language: str) -> str:
-    """Return the LLM vision HWR prompt with the target language injected."""
+    """
+    Return the LLM vision HWR prompt for a reMarkable page.
+
+    Instructs the model to:
+    - Transcribe handwritten text faithfully in the target language.
+    - Convert any diagram/graph/flowchart-like drawing into a Mermaid code block.
+    - Leave purely decorative or unrecognisable marks as-is (silently skip).
+    - Preserve the spatial order of elements top-to-bottom.
+    """
     return (
         f"This is a handwritten note rendered from a reMarkable e-ink tablet. "
         f"The text is written in {language}. "
-        f"Transcribe the exact handwritten text you see. "
-        f"Output ONLY the transcribed text in {language} — no commentary, no quotation marks, "
-        f"no explanation, no translation."
+        f"Process the page following these rules in order:\n\n"
+        f"1. HANDWRITTEN TEXT — transcribe it exactly in {language}, preserving line breaks.\n"
+        f"2. DIAGRAMS & GRAPHS — if you see a hand-drawn diagram, flowchart, graph, "
+        f"mind map, sequence diagram, state machine, ER diagram, pie chart, or similar "
+        f"structured visual, convert it to a Mermaid code block "
+        f"(e.g. ```mermaid\\ngraph LR\\n  A --> B\\n```). "
+        f"Choose the most appropriate Mermaid diagram type. "
+        f"Do NOT describe the diagram in prose — produce only the Mermaid syntax.\n"
+        f"3. DECORATIVE / UNRECOGNISABLE marks — silently ignore them.\n\n"
+        f"Output the text and Mermaid blocks in the top-to-bottom order they appear on the page. "
+        f"No commentary, no quotation marks, no explanation outside the content itself."
     )
 
 
@@ -98,7 +114,7 @@ async def _recognize_via_llm_vision(
                 {"type": "text", "text": _build_hwr_prompt(language)},
             ],
         }],
-        "max_tokens": 500,
+        "max_tokens": 1500,  # Mermaid blocks can be verbose — 500 was too tight
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
