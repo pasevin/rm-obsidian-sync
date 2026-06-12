@@ -130,7 +130,65 @@ async def _recognize_via_llm_vision(
 
     result = resp.json()
     text: str = result["choices"][0]["message"]["content"].strip()
+    text = _fix_mermaid_fences(text)
     logger.info("LLM Vision recognised %d character(s)", len(text))
+    return text
+
+
+def _fix_mermaid_fences(text: str) -> str:
+    """
+    Repair Mermaid blocks that the LLM emitted without backtick fences.
+
+    Some models output the diagram keyword and body verbatim rather than
+    wrapping in a fenced block.  Handles two failure modes:
+    1. ``mermaid\\ngraph TD\\n...`` — keyword on its own line, no backticks
+    2. Bare diagram keyword at start of an unfenced line
+
+    Also closes any ```mermaid block that was opened but never closed.
+    """
+    import re
+
+    _MERMAID_KEYWORDS = (
+        "graph", "flowchart", "sequenceDiagram", "classDiagram",
+        "stateDiagram", "erDiagram", "gantt", "pie", "mindmap",
+        "gitGraph", "journey", "timeline", "quadrantChart",
+    )
+    kw = "|".join(re.escape(k) for k in _MERMAID_KEYWORDS)
+
+    # Case 1: LLM wrote "mermaid\ngraph TD..." without opening backticks
+    text = re.sub(
+        rf"(?m)^mermaid\n({kw})",
+        r"```mermaid\n\1",
+        text,
+    )
+
+    # Case 2: bare diagram keyword at start of a line not already inside a fence
+    def _needs_fence(match: re.Match) -> bool:
+        before = text[: match.start()]
+        n_open  = before.count("```mermaid")
+        # count closing fences after the last opening fence
+        last_open = before.rfind("```mermaid")
+        n_close = before.count("```", last_open + len("```mermaid")) if last_open >= 0 else 0
+        return n_open <= n_close  # not currently inside an open block
+
+    for kw_str in _MERMAID_KEYWORDS:
+        pattern = re.compile(rf"(?m)^({re.escape(kw_str)}[ \t]*(LR|TD|RL|BT|TB)?\n)", re.IGNORECASE)
+        for m in list(pattern.finditer(text)):
+            if _needs_fence(m):
+                text = text[: m.start()] + "```mermaid\n" + text[m.start():]
+
+    # Close any ```mermaid block that was never closed
+    pos = 0
+    while True:
+        start = text.find("```mermaid", pos)
+        if start == -1:
+            break
+        end = text.find("```", start + len("```mermaid"))
+        if end == -1:
+            text += "\n```"
+            break
+        pos = end + 3
+
     return text
 
 
