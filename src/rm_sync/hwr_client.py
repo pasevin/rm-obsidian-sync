@@ -51,26 +51,31 @@ def _build_hwr_prompt(language: str) -> str:
     """
     Return the LLM vision HWR prompt for a reMarkable page.
 
-    Instructs the model to:
-    - Transcribe handwritten text faithfully in the target language.
-    - Convert any diagram/graph/flowchart-like drawing into a Mermaid code block.
-    - Leave purely decorative or unrecognisable marks as-is (silently skip).
-    - Preserve the spatial order of elements top-to-bottom.
+    Instructs the model to classify each visual element before acting on it:
+    - Handwritten text → transcribe in the target language.
+    - Structured diagram → convert to Mermaid only if it clearly represents
+      a known diagram type (flowchart, graph, sequence, etc.).
+    - Everything else (doodles, sketches, decorative marks, unclear scribbles,
+      pictures, portraits, abstract art) → silently ignore.
     """
     return (
         f"This is a handwritten note rendered from a reMarkable e-ink tablet. "
-        f"The text is written in {language}. "
-        f"Process the page following these rules in order:\n\n"
-        f"1. HANDWRITTEN TEXT — transcribe it exactly in {language}, preserving line breaks.\n"
-        f"2. DIAGRAMS & GRAPHS — if you see a hand-drawn diagram, flowchart, graph, "
-        f"mind map, sequence diagram, state machine, ER diagram, pie chart, or similar "
-        f"structured visual, convert it to a Mermaid code block "
-        f"(e.g. ```mermaid\\ngraph LR\\n  A --> B\\n```). "
-        f"Choose the most appropriate Mermaid diagram type. "
-        f"Do NOT describe the diagram in prose — produce only the Mermaid syntax.\n"
-        f"3. DECORATIVE / UNRECOGNISABLE marks — silently ignore them.\n\n"
-        f"Output the text and Mermaid blocks in the top-to-bottom order they appear on the page. "
-        f"No commentary, no quotation marks, no explanation outside the content itself."
+        f"The handwritten text language is {language}.\n\n"
+        f"For each visual element on the page, follow this decision tree:\n\n"
+        f"1. HANDWRITTEN TEXT — transcribe it exactly in {language}, preserving line breaks.\n\n"
+        f"2. STRUCTURED DIAGRAM — only if the drawing clearly and unambiguously depicts one of: "
+        f"a flowchart, decision tree, graph (nodes + edges), mind map, sequence diagram, "
+        f"state machine, ER diagram, Gantt chart, or pie chart. "
+        f"It must have recognisable structure (boxes, arrows, branches, labels). "
+        f"If it qualifies, convert it to a fenced Mermaid code block "
+        f"using the most appropriate diagram type. "
+        f"Example: ```mermaid\ngraph TD\n  A[Start] --> B[End]\n```\n\n"
+        f"3. EVERYTHING ELSE — random scribbles, doodles, sketches, abstract marks, "
+        f"portraits, objects, decorative drawings, or anything you are not confident "
+        f"is a structured diagram — silently ignore. Do NOT describe it, do NOT attempt "
+        f"to convert it, do NOT produce a Mermaid block for it.\n\n"
+        f"Output text and Mermaid blocks in top-to-bottom page order. "
+        f"No commentary, no labels like 'Text:' or 'Diagram:', no explanation."
     )
 
 
