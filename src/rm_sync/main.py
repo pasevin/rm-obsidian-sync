@@ -137,11 +137,21 @@ async def _poll_loop() -> None:
     logger.info("Starting sync poll loop (interval=%ds)", _POLL_INTERVAL_SECONDS)
 
     # Seed: on first start load existing state so we don't re-sync old notebooks.
-    # Also track lastModified per doc so we detect updates to already-known docs.
+    # Also track lastModified + size per doc so we detect updates to already-known docs.
     from rm_sync.vault_writer import load_state
     _seeded_ids: set[str] = set(load_state().keys())
-    # lastModified stamp per doc — populated lazily on first successful list call
+    # Change-detection stamps — populated lazily on first successful list call.
+    # size is tracked alongside lastModified because rmfakecloud sometimes does
+    # not bump lastModified when new pages arrive via incremental sync15 blobs.
     _last_modified: dict[str, str] = {}
+    # Pre-seed _last_size from persisted state so a daemon restart doesn't
+    # false-trigger re-syncs for all already-known documents.
+    _state_snapshot = load_state()
+    _last_size: dict[str, int] = {
+        doc_id: int(entry.get("doc_size", 0))
+        for doc_id, entry in _state_snapshot.items()
+        if entry.get("doc_size", 0)
+    }
     if _seeded_ids:
         logger.info("Poll loop: seeded with %d already-synced doc IDs", len(_seeded_ids))
     last_root_hash = ""
@@ -196,20 +206,34 @@ async def _poll_loop() -> None:
                 doc_id: str = doc.get("id", "")
                 if not doc_id:
                     continue
-                last_mod: str = doc.get("lastModified", "")
-                prev_mod: str = _last_modified.get(doc_id, "")
+                last_mod: str  = doc.get("lastModified", "")
+                doc_size: int  = int(doc.get("size", 0))
+                prev_mod: str  = _last_modified.get(doc_id, "")
+                prev_size: int = _last_size.get(doc_id, -1)
 
                 if doc_id not in known_ids:
                     # Brand-new document never seen before
                     to_sync.append(doc)
-                elif last_mod and last_mod != prev_mod:
-                    # Known doc — check if it was modified after we last synced it
+                else:
+                    # rmfakecloud sometimes does NOT bump lastModified when new
+                    # pages are added incrementally via sync15 blobs — the root
+                    # hash changes but the document listing stays stale.
+                    # Track size as a second change signal: a new drawn page
+                    # always grows the document.
                     synced_at: str = current_state.get(doc_id, {}).get("synced_at", "")
-                    if not synced_at or last_mod > synced_at:
+                    mod_changed  = last_mod and last_mod != prev_mod and (not synced_at or last_mod > synced_at)
+                    size_changed = doc_size > 0 and prev_size >= 0 and doc_size != prev_size
+                    if mod_changed or size_changed:
+                        if size_changed and not mod_changed:
+                            logger.info(
+                                "Poll: '%s' size changed (%d → %d) — queuing sync",
+                                doc.get("name", doc_id[:8]), prev_size, doc_size,
+                            )
                         to_sync.append(doc)
 
-                # Always refresh our stamp for the next tick comparison
+                # Always refresh stamps for the next tick comparison
                 _last_modified[doc_id] = last_mod
+                _last_size[doc_id] = doc_size
 
             n_new = sum(1 for d in to_sync if d["id"] not in known_ids)
             n_updated = len(to_sync) - n_new

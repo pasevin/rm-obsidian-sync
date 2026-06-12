@@ -85,6 +85,7 @@ def _update_state(
     content_hash: str,
     vault_path: Path,
     state: dict[str, Any] | None = None,
+    doc_size: int = 0,
 ) -> None:
     """Update a single document's sync record."""
     if state is None:
@@ -93,6 +94,7 @@ def _update_state(
         "hash": content_hash,
         "synced_at": datetime.now(timezone.utc).isoformat(),
         "vault_path": str(vault_path),
+        "doc_size": doc_size,   # rmfakecloud reported size — used as secondary change signal
     }
     save_state(state)
 
@@ -560,6 +562,6 @@ def write_note(
 
     # Persist sync state
     content_hash = hashlib.sha256(full_content.encode()).hexdigest()
-    _update_state(doc_id, content_hash, path)
+    _update_state(doc_id, content_hash, path, doc_size=int(doc_metadata.get("size", 0)))
 
     logger.info("Note written: %s (%d chars)", path, len(full_content))
