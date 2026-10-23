@@ -48,6 +48,19 @@ _sync_stats: dict[str, Any] = {
 _stats_lock = asyncio.Lock()
 
 
+def _build_unparseable_page_notice(
+    page_number: int,
+    page_id: str,
+    file_format: str,
+    reason: str,
+) -> str:
+    """Return visible Markdown for a page blob that could not be parsed."""
+    return (
+        f"*Page {page_number} ({page_id}) could not be parsed "
+        f"[{file_format}]: {reason}*"
+    )
+
+
 async def _record_error(msg: str) -> None:
     async with _stats_lock:
         _sync_stats["errors"].append(
@@ -184,6 +197,27 @@ async def _sync_document(
                         "Inspecting page %d/%d for %s …",
                         i + 1, len(parsed_pages), doc_id,
                     )
+                    if parsed_page.parse_error:
+                        logger.warning(
+                            "Notebook %s (%s) page %s could not be parsed (%s): %s",
+                            doc_name,
+                            doc_id[:8],
+                            parsed_page.page_id,
+                            parsed_page.file_format,
+                            parsed_page.parse_error,
+                        )
+                        prepared_pages.append(
+                            NotebookPageContent(
+                                recognized_text=_build_unparseable_page_notice(
+                                    i + 1,
+                                    parsed_page.page_id,
+                                    parsed_page.file_format,
+                                    parsed_page.parse_error,
+                                )
+                            )
+                        )
+                        continue
+
                     if not parsed_page.strokes and not parsed_page.typed_text.strip():
                         logger.info(
                             "Page %d/%d for %s is blank — no strokes or typed text",
