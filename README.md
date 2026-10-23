@@ -30,7 +30,7 @@ Obsidian    Obsidian
 1. Poll loop detects new/modified notebooks every 60s via the sync15 blob root hash
 2. Stroke data (`.rm` files) parsed from legacy v3/v5 `.lines` pages and v6 rm pages
 3. Each inked page rendered to PNG via a custom Cairo-based stroke renderer
-4. Handwriting recognised via **LLM vision** (OpenRouter, free tier) → Tesseract fallback
+4. Handwriting recognised via **LLM vision** (OpenRouter, free-tier model fallbacks) → Tesseract fallback
 5. Markdown note written to `<VAULT_RM_ROOT>/<Notebook Name>/` with embedded page images
    (blank pages are omitted and fully empty notebooks are skipped by default)
 6. **Deletions propagate** — if a notebook is deleted on the tablet, the corresponding vault directory is removed on the next poll cycle (see [Deletion behaviour](#deletion-behaviour))
@@ -184,7 +184,8 @@ All settings live in `.env` (copy from `.env.example`):
 | `VAULT_RM_ROOT` | — | `Inbox/reMarkable` | Sub-path for reMarkable notes inside vault |
 | `SKIP_EMPTY_NOTEBOOKS` | — | `1` | When enabled, omit blank pages and skip writing notebooks with no strokes and no text |
 | `OPENROUTER_API_KEY` | ✓ | — | OpenRouter key for LLM vision HWR |
-| `LLM_VISION_MODEL` | — | `nvidia/nemotron-nano-12b-vl:free` | OpenRouter model for HWR |
+| `LLM_VISION_MODELS` | — | `google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3.5-super-vl:free` | Ordered OpenRouter model fallbacks for HWR |
+| `LLM_VISION_MODEL` | — | `google/gemma-4-31b-it:free` | Backward-compatible single-model alias; prefer `LLM_VISION_MODELS` |
 | `WEBHOOK_PORT` | — | `9090` | Daemon listen port |
 | `PANDOC_BIN` | — | `pandoc` | Path to pandoc binary |
 | `WKHTMLTOPDF_BIN` | — | `wkhtmltopdf` | Path to wkhtmltopdf binary |
@@ -253,6 +254,12 @@ output produced from that page.
 Pages whose `.rm` blobs cannot be parsed are **not** treated as empty. They are
 kept in the note with a visible placeholder and a warning in the daemon logs so
 legacy-format or corrupt pages cannot silently disappear from the vault.
+
+For handwriting recognition, OpenRouter models can now be configured as an
+ordered fallback list via `LLM_VISION_MODELS`. The daemon tries them in order
+when a model is removed, rate-limited, times out, returns a 5xx, or yields
+empty output, and only then falls through to MyScript/Tesseract. The engine
+and model that produced page text are logged so quality issues are traceable.
 
 With the option enabled:
 

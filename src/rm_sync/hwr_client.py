@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import dataclass
 import hashlib
 import hmac as _hmac
 import json
@@ -45,7 +46,26 @@ logger = logging.getLogger(__name__)
 
 _MYSCRIPT_URL = "https://cloud.myscript.com/api/v4.0/iink/batch"
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _TESSERACT_IMAGE = "tesseractshadow/tesseract4re"
+_OPENROUTER_FALLBACK_BACKOFF_SECONDS = 1.0
+_WARNED_DEAD_OPENROUTER_MODELS: set[str] = set()
+
+
+@dataclass(frozen=True)
+class RecognitionResult:
+    """Recognition output plus the engine/model that produced it."""
+
+    text: str
+    engine: str
+    model: str = ""
+
+    def source_label(self) -> str:
+        """Return a human-readable label for logs."""
+        if self.engine == "openrouter" and self.model:
+            return f"{self.engine}:{self.model}"
+        return self.engine
+
 
 def _build_hwr_prompt(language: str) -> str:
     """
@@ -84,8 +104,31 @@ def _build_hwr_prompt(language: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _recognize_via_llm_vision(
-    strokes: list[dict[str, Any]],
+def _openrouter_headers(api_key: str) -> dict[str, str]:
+    """Return the standard OpenRouter request headers."""
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/rm-obsidian-sync",
+        "X-Title": "rm-obsidian-sync",
+    }
+
+
+def _warn_dead_openrouter_model_once(model: str, status_code: int) -> None:
+    """Warn once per run when a configured OpenRouter model no longer exists."""
+    if model in _WARNED_DEAD_OPENROUTER_MODELS:
+        return
+    _WARNED_DEAD_OPENROUTER_MODELS.add(model)
+    logger.warning(
+        "Configured OpenRouter model is unavailable and should be replaced: "
+        "%s returned HTTP %d",
+        model,
+        status_code,
+    )
+
+
+async def _recognize_via_llm_vision_model(
+    png_bytes: bytes,
     model: str,
     api_key: str,
     language: str = "English",
@@ -94,7 +137,7 @@ async def _recognize_via_llm_vision(
     Render strokes to PNG and send to an OpenRouter vision model for HWR.
 
     Args:
-        strokes:   Stroke dicts from rm_parser.
+        png_bytes: Rendered page PNG bytes.
         model:     OpenRouter model ID (e.g. ``nvidia/nemotron-nano-12b-v2-vl:free``).
         api_key:   OpenRouter API key.
         language:  Natural-language name of the writing language (e.g. ``English``).
@@ -105,9 +148,6 @@ async def _recognize_via_llm_vision(
     Raises:
         httpx.HTTPStatusError: On non-2xx responses.
     """
-    png_bytes = await asyncio.get_event_loop().run_in_executor(
-        None, render_page_to_png, strokes
-    )
     img_b64 = base64.b64encode(png_bytes).decode()
 
     payload = {
@@ -121,14 +161,9 @@ async def _recognize_via_llm_vision(
         }],
         "max_tokens": 1500,  # Mermaid blocks can be verbose — 500 was too tight
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/rm-obsidian-sync",
-        "X-Title": "rm-obsidian-sync",
-    }
+    headers = _openrouter_headers(api_key)
 
-    logger.info("Sending %d stroke(s) to LLM Vision HWR (model=%s) …", len(strokes), model)
+    logger.info("Sending rendered page to LLM Vision HWR (model=%s) …", model)
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(_OPENROUTER_URL, json=payload, headers=headers)
         resp.raise_for_status()
@@ -138,6 +173,80 @@ async def _recognize_via_llm_vision(
     text = _fix_mermaid_fences(text)
     logger.info("LLM Vision recognised %d character(s)", len(text))
     return text
+
+
+async def _recognize_via_llm_vision_models(
+    png_bytes: bytes,
+    models: tuple[str, ...],
+    api_key: str,
+    language: str,
+) -> RecognitionResult | None:
+    """Try the configured OpenRouter model list in order until one succeeds."""
+    for model in models:
+        try:
+            text = await _recognize_via_llm_vision_model(
+                png_bytes,
+                model,
+                api_key,
+                language=language,
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in (404, 410):
+                _warn_dead_openrouter_model_once(model, status_code)
+                continue
+            if status_code == 429:
+                logger.warning(
+                    "OpenRouter model %s was rate-limited (429) — trying the next model",
+                    model,
+                )
+                await asyncio.sleep(_OPENROUTER_FALLBACK_BACKOFF_SECONDS)
+                continue
+            if 500 <= status_code < 600:
+                logger.warning(
+                    "OpenRouter model %s failed with HTTP %d — trying the next model",
+                    model,
+                    status_code,
+                )
+                continue
+            logger.warning(
+                "OpenRouter model %s failed with non-retriable HTTP %d — "
+                "falling through to the next engine",
+                model,
+                status_code,
+            )
+            return None
+        except httpx.TimeoutException:
+            logger.warning(
+                "OpenRouter model %s timed out — trying the next model",
+                model,
+            )
+            continue
+        except httpx.RequestError as exc:
+            logger.warning(
+                "OpenRouter request failed for model %s — trying the next model: %s",
+                model,
+                exc,
+            )
+            continue
+        except Exception as exc:
+            logger.warning(
+                "LLM Vision failed for model %s — falling through to the next engine: %s",
+                model,
+                exc,
+            )
+            return None
+
+        if not text.strip():
+            logger.warning(
+                "OpenRouter model %s returned empty output — trying the next model",
+                model,
+            )
+            continue
+
+        return RecognitionResult(text=text, engine="openrouter", model=model)
+
+    return None
 
 
 def _fix_mermaid_fences(text: str) -> str:
@@ -290,13 +399,45 @@ def _recognize_via_tesseract(strokes: list[dict[str, Any]]) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def recognize_page(
+async def validate_openrouter_models(models: tuple[str, ...]) -> None:
+    """
+    Warn when configured OpenRouter model ids are missing from the public catalog.
+
+    This is best-effort only and must never fail startup.
+    """
+    if not models:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(_OPENROUTER_MODELS_URL)
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("OpenRouter model validation check failed: %s", exc)
+        return
+
+    payload = resp.json()
+    entries = payload.get("data", []) if isinstance(payload, dict) else []
+    known_ids = {
+        entry.get("id")
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("id")
+    }
+    unknown_models = [model for model in models if model not in known_ids]
+    if unknown_models:
+        logger.warning(
+            "Configured OpenRouter model ids were not found in the public catalog: %s",
+            ", ".join(unknown_models),
+        )
+
+
+async def recognize_page_result(
     strokes: list[dict[str, Any]],
     lang: str | None = None,
     *,
     app_key: str | None = None,
     hmac_key: str | None = None,
-) -> str:
+) -> RecognitionResult:
     """
     Recognise a single page's strokes using the best available backend.
 
@@ -309,11 +450,11 @@ async def recognize_page(
         hmac_key: MyScript HMAC key override.
 
     Returns:
-        Recognised text, or ``""`` on failure.
+        Recognition text plus the engine/model that produced it.
     """
     if not strokes:
         logger.debug("No strokes on page — skipping HWR")
-        return ""
+        return RecognitionResult(text="", engine="none")
 
     # HWR_LANGUAGE is a natural-language name (e.g. "English") — used in the
     # LLM Vision prompt.  MyScript requires a BCP-47 tag (e.g. "en_US"), so
@@ -323,21 +464,32 @@ async def recognize_page(
 
     # ── 1. LLM Vision ────────────────────────────────────────────────────
     _or_key = config.openrouter_api_key
-    _model = config.llm_vision_model
-    if _or_key and _model:
+    _models = config.llm_vision_models
+    if _or_key and _models:
         try:
-            return await _recognize_via_llm_vision(strokes, _model, _or_key, language=_lang_natural)
+            png_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, render_page_to_png, strokes
+            )
+            llm_result = await _recognize_via_llm_vision_models(
+                png_bytes,
+                _models,
+                _or_key,
+                language=_lang_natural,
+            )
+            if llm_result is not None:
+                return llm_result
         except Exception as exc:
             logger.warning("LLM Vision HWR failed — trying MyScript: %s", exc)
     else:
-        logger.debug("OpenRouter key not configured — skipping LLM Vision")
+        logger.debug("OpenRouter key or model list not configured — skipping LLM Vision")
 
     # ── 2. MyScript ───────────────────────────────────────────────────────
     _app_key = app_key or config.myscript_app_key
     _hmac_key = hmac_key or config.myscript_hmac_key
     if _app_key and _hmac_key:
         try:
-            return await _recognize_via_myscript(strokes, _lang_bcp47, _app_key, _hmac_key)
+            text = await _recognize_via_myscript(strokes, _lang_bcp47, _app_key, _hmac_key)
+            return RecognitionResult(text=text, engine="myscript")
         except Exception as exc:
             logger.warning("MyScript HWR failed — falling back to Tesseract: %s", exc)
     else:
@@ -345,12 +497,30 @@ async def recognize_page(
 
     # ── 3. Tesseract ──────────────────────────────────────────────────────
     try:
-        return await asyncio.get_event_loop().run_in_executor(
+        text = await asyncio.get_event_loop().run_in_executor(
             None, _recognize_via_tesseract, strokes
         )
+        return RecognitionResult(text=text, engine="tesseract")
     except Exception as exc:
         logger.error("Tesseract fallback also failed: %s", exc)
-        return ""
+        return RecognitionResult(text="", engine="none")
+
+
+async def recognize_page(
+    strokes: list[dict[str, Any]],
+    lang: str | None = None,
+    *,
+    app_key: str | None = None,
+    hmac_key: str | None = None,
+) -> str:
+    """Backward-compatible wrapper that returns only the recognised text."""
+    result = await recognize_page_result(
+        strokes,
+        lang=lang,
+        app_key=app_key,
+        hmac_key=hmac_key,
+    )
+    return result.text
 
 
 async def recognize_document(
@@ -371,12 +541,13 @@ async def recognize_document(
     for i, strokes in enumerate(pages_strokes):
         logger.info("Recognising page %d/%d …", i + 1, len(pages_strokes))
         try:
-            text = await recognize_page(
+            result = await recognize_page_result(
                 strokes,
                 lang=lang,
                 app_key=app_key,
                 hmac_key=hmac_key,
             )
+            text = result.text
         except Exception as exc:
             logger.error("HWR failed for page %d: %s", i + 1, exc)
             text = ""

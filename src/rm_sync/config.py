@@ -35,6 +35,34 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_csv(name: str) -> tuple[str, ...]:
+    """Parse a comma-separated environment variable into a tuple of values."""
+    raw = os.environ.get(name, "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _default_llm_vision_models() -> tuple[str, ...]:
+    """Return the default ordered list of free OpenRouter vision models."""
+    return (
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3.5-super-vl:free",
+    )
+
+
+def _resolve_llm_vision_models() -> tuple[str, ...]:
+    """Resolve the configured OpenRouter model list with alias fallback."""
+    models = _env_csv("LLM_VISION_MODELS")
+    if models:
+        return models
+
+    legacy_alias = os.environ.get("LLM_VISION_MODEL", "").strip()
+    if legacy_alias:
+        return (legacy_alias,)
+
+    return _default_llm_vision_models()
+
+
 @dataclass(frozen=True)
 class Config:
     """All runtime settings, populated from environment variables."""
@@ -99,11 +127,14 @@ class Config:
 
     llm_vision_model: str = field(
         default_factory=lambda: os.environ.get(
-            "LLM_VISION_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"
-        )
+            "LLM_VISION_MODEL",
+            _default_llm_vision_models()[0],
+        ).strip()
     )
-    """OpenRouter model ID used for LLM vision HWR.
-    Default: ``nvidia/nemotron-nano-12b-v2-vl:free`` (free, excellent handwriting)."""
+    """Legacy single-model OpenRouter alias kept for backward compatibility."""
+
+    llm_vision_models: tuple[str, ...] = field(default_factory=_resolve_llm_vision_models)
+    """Ordered OpenRouter model list used by the LLM vision fallback chain."""
 
     hwr_language: str = field(
         default_factory=lambda: os.environ.get("HWR_LANGUAGE", "English")

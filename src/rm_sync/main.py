@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from rm_sync.config import config
+from rm_sync.hwr_client import validate_openrouter_models
 from rm_sync.webhook import router as webhook_router
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Vault path      : %s", config.vault_path)
     logger.info("Vault RM root   : %s", config.vault_rm_root)
     logger.info("Skip empty docs : %s", config.skip_empty_notebooks)
+    logger.info("LLM Vision models: %s", ", ".join(config.llm_vision_models))
     logger.info("Webhook port    : %d", config.webhook_port)
     logger.info("Auth state file : %s", config.auth_state_file)
     logger.info("Sync state file : %s", config.sync_state_file)
@@ -84,6 +86,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     except Exception as exc:
         logger.warning("Startup token validation error: %s", exc)
+
+    # Best-effort validation against OpenRouter's public model catalog
+    await validate_openrouter_models(config.llm_vision_models)
 
     # Make sure vault root exists
     try:
