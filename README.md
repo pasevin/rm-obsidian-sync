@@ -28,7 +28,7 @@ Obsidian    Obsidian
 ### reMarkable → Obsidian
 
 1. Poll loop detects new/modified notebooks every 60s via the sync15 blob root hash
-2. Stroke data (`.rm` files) parsed via [`rmscene`](https://github.com/ricklupton/rmscene)
+2. Stroke data (`.rm` files) parsed from legacy v3/v5 `.lines` pages and v6 rm pages
 3. Each inked page rendered to PNG via a custom Cairo-based stroke renderer
 4. Handwriting recognised via **LLM vision** (OpenRouter, free tier) → Tesseract fallback
 5. Markdown note written to `<VAULT_RM_ROOT>/<Notebook Name>/` with embedded page images
@@ -249,6 +249,10 @@ notebooks that have no real content.
 A page is treated as empty only when it has **no pen strokes** and **no text**:
 no typed text embedded in the reMarkable page, and no recognised handwriting
 output produced from that page.
+
+Pages whose `.rm` blobs cannot be parsed are **not** treated as empty. They are
+kept in the note with a visible placeholder and a warning in the daemon logs so
+legacy-format or corrupt pages cannot silently disappear from the vault.
 
 With the option enabled:
 

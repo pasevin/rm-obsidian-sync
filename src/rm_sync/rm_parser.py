@@ -33,6 +33,12 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any
 
+from rm_sync.legacy_lines_parser import (
+    LegacyLinesFormatError,
+    detect_legacy_lines_version,
+    parse_legacy_lines_page,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,8 +125,11 @@ _DEFAULT_TOOL = "fineliner"
 class ParsedPage:
     """Parsed content for one notebook page."""
 
+    page_id: str
     strokes: list[dict[str, Any]]
     typed_text: str = ""
+    file_format: str = "v6"
+    parse_error: str | None = None
 
 
 def _resolve_color(line: Any) -> tuple[tuple[int, int, int], float]:
@@ -303,25 +312,65 @@ def _extract_typed_text_from_tree(tree: Any, page_id: str) -> str:
     return text.strip()
 
 
+def _describe_exception(exc: Exception) -> str:
+    """Return a non-empty, human-readable exception description."""
+    msg = str(exc).strip()
+    if msg:
+        return f"{exc.__class__.__name__}: {msg}"
+    return exc.__class__.__name__
+
+
 def _parse_page_from_rm_bytes(rm_bytes: bytes, page_id: str) -> ParsedPage:
     """
     Parse a single ``.rm`` (v6) binary blob into strokes and typed text.
 
-    On any parse error the exception is logged and an empty page record is
-    returned so the rest of the document can still be processed.
+    Parse failures are returned as explicit unparseable page records so callers
+    can distinguish them from genuinely empty pages.
     """
+    legacy_version = detect_legacy_lines_version(rm_bytes)
+    if legacy_version is not None:
+        try:
+            legacy_page = parse_legacy_lines_page(rm_bytes)
+        except LegacyLinesFormatError as exc:
+            return ParsedPage(
+                page_id=page_id,
+                strokes=[],
+                typed_text="",
+                file_format=f"v{legacy_version}-lines",
+                parse_error=str(exc),
+            )
+        return ParsedPage(
+            page_id=page_id,
+            strokes=legacy_page.strokes,
+            typed_text="",
+            file_format=f"v{legacy_page.version}-lines",
+        )
+
     if not _RMSCENE_AVAILABLE:
-        return ParsedPage(strokes=[], typed_text="")
+        return ParsedPage(
+            page_id=page_id,
+            strokes=[],
+            typed_text="",
+            file_format="v6",
+            parse_error="rmscene stroke parsing support is unavailable",
+        )
 
     try:
         tree = read_tree(io.BytesIO(rm_bytes))
     except Exception as exc:
-        logger.error("Failed to read .rm tree for page %s: %s", page_id, exc)
-        return ParsedPage(strokes=[], typed_text="")
+        return ParsedPage(
+            page_id=page_id,
+            strokes=[],
+            typed_text="",
+            file_format="v6",
+            parse_error=_describe_exception(exc),
+        )
 
     return ParsedPage(
+        page_id=page_id,
         strokes=_parse_strokes_from_tree(tree, page_id),
         typed_text=_extract_typed_text_from_tree(tree, page_id),
+        file_format="v6",
     )
 
 
@@ -441,14 +490,33 @@ def parse_rmdoc_pages(rmdoc_bytes: bytes) -> list[ParsedPage]:
                     rm_path = alt
                 else:
                     logger.debug("No .rm file for page %s", page_id)
-                    parsed_pages.append(ParsedPage(strokes=[], typed_text=""))
+                    parsed_pages.append(
+                        ParsedPage(
+                            page_id=page_id,
+                            strokes=[],
+                            typed_text="",
+                            file_format="missing",
+                            parse_error=f"Page blob {rm_path} is missing from the archive",
+                        )
+                    )
                     continue
 
             try:
                 rm_bytes = zf.read(rm_path)
             except Exception as exc:
                 logger.error("Failed to read %s from archive: %s", rm_path, exc)
-                parsed_pages.append(ParsedPage(strokes=[], typed_text=""))
+                parsed_pages.append(
+                    ParsedPage(
+                        page_id=page_id,
+                        strokes=[],
+                        typed_text="",
+                        file_format="unknown",
+                            parse_error=(
+                                f"Failed to read page blob {rm_path}: "
+                                f"{_describe_exception(exc)}"
+                            ),
+                    )
+                )
                 continue
 
             parsed_pages.append(_parse_page_from_rm_bytes(rm_bytes, page_id))
