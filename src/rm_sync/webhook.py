@@ -23,11 +23,16 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Form, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from rm_sync.hwr_client import recognize_document, recognize_page
+from rm_sync.hwr_client import recognize_page
+from rm_sync.notebook_content import (
+    NotebookPageContent,
+    filter_empty_pages,
+    notebook_has_real_content,
+)
 from rm_sync.rm_client import RmClient
-from rm_sync.rm_parser import extract_metadata, parse_rmdoc
+from rm_sync.rm_parser import extract_metadata, parse_rmdoc_pages
 from rm_sync.stroke_renderer import render_page_to_png
-from rm_sync.vault_writer import load_state, resolve_note_path, write_note
+from rm_sync.vault_writer import mark_note_skipped, resolve_note_path, write_note
 from rm_sync.config import config
 
 logger = logging.getLogger(__name__)
@@ -104,7 +109,11 @@ def _extract_doc_ids(destinations: list[dict[str, Any]]) -> list[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _sync_document(doc_id: str, display_name: str | None = None) -> None:
+async def _sync_document(
+    doc_id: str,
+    display_name: str | None = None,
+    doc_size: int = 0,
+) -> None:
     """
     Full sync pipeline for a single document:
 
@@ -119,6 +128,8 @@ async def _sync_document(doc_id: str, display_name: str | None = None) -> None:
         display_name: Optional display name from the rmfakecloud listing. When
                       provided, overrides the ``name`` value embedded in the
                       .content file (which often reads ``"Untitled"``).
+        doc_size:     Size reported by rmfakecloud, persisted so blank notebooks
+                      are still tracked for later change detection.
 
     All errors are caught internally so one bad document doesn't break
     the background-task runner.
@@ -150,11 +161,11 @@ async def _sync_document(doc_id: str, display_name: str | None = None) -> None:
 
             # Add the doc_id into metadata so vault_writer can access it
             metadata["id"] = doc_id
+            metadata["size"] = doc_size
 
             # ---------------------------------------------------------------- #
             # 3. HWR + stroke rendering (notebooks only)
             # ---------------------------------------------------------------- #
-            pages_strokes: list[list[dict]] = []
             page_texts: list[str] = []
             page_images: list[bytes] = []
 
@@ -165,35 +176,77 @@ async def _sync_document(doc_id: str, display_name: str | None = None) -> None:
                 page_texts = [f"*This note is a {file_type} — stroke recognition skipped.*"]
                 page_images = [b""]
             else:
-                pages_strokes = parse_rmdoc(rmdoc_bytes)
+                parsed_pages = parse_rmdoc_pages(rmdoc_bytes)
+                prepared_pages: list[NotebookPageContent] = []
 
-                for i, strokes in enumerate(pages_strokes):
+                for i, parsed_page in enumerate(parsed_pages):
                     logger.info(
-                        "Rendering + recognising page %d/%d for %s …",
-                        i + 1, len(pages_strokes), doc_id,
+                        "Inspecting page %d/%d for %s …",
+                        i + 1, len(parsed_pages), doc_id,
                     )
-                    # Render PNG
-                    try:
-                        png_bytes = await asyncio.get_event_loop().run_in_executor(
-                            None, render_page_to_png, strokes
+                    if not parsed_page.strokes and not parsed_page.typed_text.strip():
+                        logger.info(
+                            "Page %d/%d for %s is blank — no strokes or typed text",
+                            i + 1, len(parsed_pages), doc_id,
                         )
-                    except Exception as exc:
-                        logger.error("PNG render failed page %d: %s", i + 1, exc)
-                        png_bytes = b""
+                        prepared_pages.append(NotebookPageContent())
+                        continue
 
-                    # Recognise text (per-page so we keep per-page granularity)
-                    try:
-                        text = await recognize_page(strokes)
-                    except Exception as exc:
-                        logger.error("HWR failed page %d: %s", i + 1, exc)
-                        text = ""
+                    png_bytes = b""
+                    recognized_text = ""
+                    if parsed_page.strokes:
+                        logger.info(
+                            "Rendering + recognising page %d/%d for %s …",
+                            i + 1, len(parsed_pages), doc_id,
+                        )
+                        try:
+                            png_bytes = await asyncio.get_event_loop().run_in_executor(
+                                None, render_page_to_png, parsed_page.strokes
+                            )
+                        except Exception as exc:
+                            logger.error("PNG render failed page %d: %s", i + 1, exc)
+                            png_bytes = b""
 
-                    page_images.append(png_bytes)
-                    page_texts.append(text)
+                        try:
+                            recognized_text = await recognize_page(parsed_page.strokes)
+                        except Exception as exc:
+                            logger.error("HWR failed page %d: %s", i + 1, exc)
+                            recognized_text = ""
+                    else:
+                        logger.info(
+                            "Page %d/%d for %s has typed text only — skipping render + HWR",
+                            i + 1, len(parsed_pages), doc_id,
+                        )
 
-                if not pages_strokes:
+                    prepared_pages.append(
+                        NotebookPageContent(
+                            strokes=parsed_page.strokes,
+                            typed_text=parsed_page.typed_text,
+                            recognized_text=recognized_text,
+                            image_bytes=png_bytes,
+                        )
+                    )
+
+                pages_for_note = filter_empty_pages(
+                    prepared_pages,
+                    skip_empty_pages=config.skip_empty_notebooks,
+                )
+                if config.skip_empty_notebooks and not notebook_has_real_content(pages_for_note):
+                    mark_note_skipped(doc_id, doc_size=doc_size)
+                    await _record_sync_complete()
+                    logger.info(
+                        "Skipping empty notebook %s (%s) — no strokes or text found",
+                        doc_name,
+                        doc_id[:8],
+                    )
+                    return
+
+                if not pages_for_note and not parsed_pages:
                     page_texts = ["*No strokes found in document.*"]
                     page_images = [b""]
+                else:
+                    page_texts = [page.body_text() for page in pages_for_note]
+                    page_images = [page.image_bytes for page in pages_for_note]
 
             # ---------------------------------------------------------------- #
             # 4. Write vault note (with per-page PNG attachments)

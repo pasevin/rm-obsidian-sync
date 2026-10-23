@@ -50,8 +50,11 @@ def load_state() -> dict[str, Any]:
         {
             "<doc_id>": {
                 "hash": "<sha256 of last written content>",
-                "synced_at": "<ISO-8601 UTC timestamp>",
-                "vault_path": "<absolute path>"
+                "synced_at": "<ISO-8601 UTC timestamp of last vault write>",
+                "processed_at": "<ISO-8601 UTC timestamp of last sync attempt>",
+                "vault_path": "<absolute path or empty string>",
+                "doc_size": <rmfakecloud reported size>,
+                "skipped_empty": <bool, optional>
             },
             ...
         }
@@ -88,13 +91,38 @@ def _update_state(
     doc_size: int = 0,
 ) -> None:
     """Update a single document's sync record."""
+    now = datetime.now(timezone.utc).isoformat()
     if state is None:
         state = load_state()
     state[doc_id] = {
         "hash": content_hash,
-        "synced_at": datetime.now(timezone.utc).isoformat(),
+        "synced_at": now,
+        "processed_at": now,
         "vault_path": str(vault_path),
         "doc_size": doc_size,   # rmfakecloud reported size — used as secondary change signal
+    }
+    save_state(state)
+
+
+def mark_note_skipped(doc_id: str, *, doc_size: int = 0) -> None:
+    """
+    Mark a document as seen without writing a vault note.
+
+    This is used for empty notebooks when ``SKIP_EMPTY_NOTEBOOKS`` is enabled.
+    Preserving a state entry prevents the poll loop from reprocessing the same
+    blank notebook on every restart, while keeping any existing vault note path
+    intact so previously-synced notes are never deleted by this change.
+    """
+    state = load_state()
+    previous = state.get(doc_id, {})
+    now = datetime.now(timezone.utc).isoformat()
+    state[doc_id] = {
+        "hash": previous.get("hash", ""),
+        "synced_at": previous.get("synced_at", ""),
+        "processed_at": now,
+        "vault_path": previous.get("vault_path", ""),
+        "doc_size": doc_size,
+        "skipped_empty": True,
     }
     save_state(state)
 
@@ -232,7 +260,17 @@ def delete_note(doc_id: str) -> bool:
         logger.debug("delete_note: %s not in state — nothing to do", doc_id[:8])
         return False
 
-    vault_path = Path(entry["vault_path"])      # the .md file
+    vault_path_str = entry.get("vault_path", "")
+    if not vault_path_str:
+        logger.info(
+            "delete_note: %s had no vault note on disk (likely skipped empty) — cleaning state",
+            doc_id[:8],
+        )
+        del state[doc_id]
+        save_state(state)
+        return True
+
+    vault_path = Path(vault_path_str)           # the .md file
     note_dir   = vault_path.parent              # the notebook subdirectory
 
     if not note_dir.exists():
