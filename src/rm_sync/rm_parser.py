@@ -41,23 +41,29 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
-    from rmscene import (  # type: ignore[import]
-        read_tree,
-        SceneLineItemBlock,
-        TextDocument,
-    )
+    from rmscene import read_tree, SceneLineItemBlock  # type: ignore[import]
     from rmscene.scene_items import Line, Pen, PenColor  # type: ignore[import]
 
     _RMSCENE_AVAILABLE = True
-except ImportError:
-    logger.warning(
-        "rmscene is not installed — stroke parsing will return empty pages. "
-        "Install it with: uv pip install rmscene"
+except ImportError as exc:
+    logger.error(
+        "Failed to import rmscene stroke parsing support; stroke parsing will "
+        "be disabled: %s",
+        exc,
     )
     _RMSCENE_AVAILABLE = False
     Line = None  # type: ignore[assignment,misc]
     Pen = None   # type: ignore[assignment,misc]
     PenColor = None  # type: ignore[assignment,misc]
+
+try:
+    from rmscene.text import TextDocument  # type: ignore[import]
+except ImportError as exc:
+    logger.warning(
+        "Failed to import rmscene typed-text support; typed-text extraction "
+        "will be disabled: %s",
+        exc,
+    )
     TextDocument = None  # type: ignore[assignment,misc]
 
 
