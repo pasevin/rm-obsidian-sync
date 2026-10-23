@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Form, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from rm_sync.hwr_client import recognize_page
+from rm_sync.hwr_client import recognize_page_result
 from rm_sync.notebook_content import (
     NotebookPageContent,
     filter_empty_pages,
@@ -242,7 +242,16 @@ async def _sync_document(
                             png_bytes = b""
 
                         try:
-                            recognized_text = await recognize_page(parsed_page.strokes)
+                            recognition = await recognize_page_result(parsed_page.strokes)
+                            recognized_text = recognition.text
+                            if recognized_text:
+                                logger.info(
+                                    "Page %d/%d for %s recognised via %s",
+                                    i + 1,
+                                    len(parsed_pages),
+                                    doc_id,
+                                    recognition.source_label(),
+                                )
                         except Exception as exc:
                             logger.error("HWR failed page %d: %s", i + 1, exc)
                             recognized_text = ""
