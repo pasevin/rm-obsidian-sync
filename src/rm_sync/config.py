@@ -27,6 +27,14 @@ def _state_dir() -> Path:
     return d
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable with a sensible default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 @dataclass(frozen=True)
 class Config:
     """All runtime settings, populated from environment variables."""
@@ -67,6 +75,11 @@ class Config:
         )
     )
     """Sub-path inside the vault where reMarkable notes are written."""
+
+    skip_empty_notebooks: bool = field(
+        default_factory=lambda: _env_bool("SKIP_EMPTY_NOTEBOOKS", True)
+    )
+    """When true, skip writing notebooks that have no strokes or text."""
 
     # ------------------------------------------------------------------ #
     # Webhook server

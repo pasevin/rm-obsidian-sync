@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("rmfakecloud URL : %s", config.rmfakecloud_url)
     logger.info("Vault path      : %s", config.vault_path)
     logger.info("Vault RM root   : %s", config.vault_rm_root)
+    logger.info("Skip empty docs : %s", config.skip_empty_notebooks)
     logger.info("Webhook port    : %d", config.webhook_port)
     logger.info("Auth state file : %s", config.auth_state_file)
     logger.info("Sync state file : %s", config.sync_state_file)
@@ -220,8 +221,15 @@ async def _poll_loop() -> None:
                     # hash changes but the document listing stays stale.
                     # Track size as a second change signal: a new drawn page
                     # always grows the document.
-                    synced_at: str = current_state.get(doc_id, {}).get("synced_at", "")
-                    mod_changed  = last_mod and last_mod != prev_mod and (not synced_at or last_mod > synced_at)
+                    last_processed_at: str = (
+                        current_state.get(doc_id, {}).get("processed_at")
+                        or current_state.get(doc_id, {}).get("synced_at", "")
+                    )
+                    mod_changed = (
+                        last_mod
+                        and last_mod != prev_mod
+                        and (not last_processed_at or last_mod > last_processed_at)
+                    )
                     size_changed = doc_size > 0 and prev_size >= 0 and doc_size != prev_size
                     if mod_changed or size_changed:
                         if size_changed and not mod_changed:
@@ -252,7 +260,13 @@ async def _poll_loop() -> None:
                         "Poll: scheduling sync for '%s' (%s)",
                         api_name or "?", doc_id[:8],
                     )
-                    asyncio.create_task(_sync_document(doc_id, display_name=api_name))
+                    asyncio.create_task(
+                        _sync_document(
+                            doc_id,
+                            display_name=api_name,
+                            doc_size=int(doc.get("size", 0)),
+                        )
+                    )
 
         except asyncio.CancelledError:
             logger.info("Poll loop cancelled.")

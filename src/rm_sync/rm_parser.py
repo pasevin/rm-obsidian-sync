@@ -30,6 +30,7 @@ import io
 import json
 import logging
 import zipfile
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,11 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
-    from rmscene import read_tree, SceneLineItemBlock  # type: ignore[import]
+    from rmscene import (  # type: ignore[import]
+        read_tree,
+        SceneLineItemBlock,
+        TextDocument,
+    )
     from rmscene.scene_items import Line, Pen, PenColor  # type: ignore[import]
 
     _RMSCENE_AVAILABLE = True
@@ -53,6 +58,7 @@ except ImportError:
     Line = None  # type: ignore[assignment,misc]
     Pen = None   # type: ignore[assignment,misc]
     PenColor = None  # type: ignore[assignment,misc]
+    TextDocument = None  # type: ignore[assignment,misc]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -101,6 +107,14 @@ _TOOL_MAP: dict[int, str] = {
     23: "shader",
 }
 _DEFAULT_TOOL = "fineliner"
+
+
+@dataclass
+class ParsedPage:
+    """Parsed content for one notebook page."""
+
+    strokes: list[dict[str, Any]]
+    typed_text: str = ""
 
 
 def _resolve_color(line: Any) -> tuple[tuple[int, int, int], float]:
@@ -203,23 +217,8 @@ def _line_to_stroke(line: Any, stroke_index: int) -> dict[str, Any] | None:
     }
 
 
-def _parse_strokes_from_rm_bytes(rm_bytes: bytes, page_id: str) -> list[dict]:
-    """
-    Parse a single ``.rm`` (v6) binary blob and return a list of full-fidelity
-    stroke dicts.
-
-    On any parse error the exception is logged and an empty list is returned
-    so the rest of the document can still be processed.
-    """
-    if not _RMSCENE_AVAILABLE:
-        return []
-
-    try:
-        tree = read_tree(io.BytesIO(rm_bytes))
-    except Exception as exc:
-        logger.error("Failed to read .rm tree for page %s: %s", page_id, exc)
-        return []
-
+def _parse_strokes_from_tree(tree: Any, page_id: str) -> list[dict]:
+    """Extract stroke dicts from a parsed rmscene tree."""
     strokes: list[dict] = []
     stroke_index = 0
 
@@ -277,6 +276,47 @@ def _parse_strokes_from_rm_bytes(rm_bytes: bytes, page_id: str) -> list[dict]:
         sum(len(s["x"]) for s in strokes),
     )
     return strokes
+
+
+def _extract_typed_text_from_tree(tree: Any, page_id: str) -> str:
+    """Extract typed-text content from a parsed rmscene tree."""
+    if TextDocument is None:
+        return ""
+
+    root_text = getattr(tree, "root_text", None)
+    if not root_text:
+        return ""
+
+    try:
+        doc = TextDocument.from_scene_item(root_text)
+        text = "".join(str(paragraph) for paragraph in getattr(doc, "contents", []))
+    except Exception as exc:
+        logger.debug("Failed to extract typed text for page %s: %s", page_id, exc)
+        return ""
+
+    return text.strip()
+
+
+def _parse_page_from_rm_bytes(rm_bytes: bytes, page_id: str) -> ParsedPage:
+    """
+    Parse a single ``.rm`` (v6) binary blob into strokes and typed text.
+
+    On any parse error the exception is logged and an empty page record is
+    returned so the rest of the document can still be processed.
+    """
+    if not _RMSCENE_AVAILABLE:
+        return ParsedPage(strokes=[], typed_text="")
+
+    try:
+        tree = read_tree(io.BytesIO(rm_bytes))
+    except Exception as exc:
+        logger.error("Failed to read .rm tree for page %s: %s", page_id, exc)
+        return ParsedPage(strokes=[], typed_text="")
+
+    return ParsedPage(
+        strokes=_parse_strokes_from_tree(tree, page_id),
+        typed_text=_extract_typed_text_from_tree(tree, page_id),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -364,6 +404,16 @@ def parse_rmdoc(rmdoc_bytes: bytes) -> list[list[dict]]:
 
         Pages that fail to parse are represented as empty lists ``[]``.
     """
+    return [page.strokes for page in parse_rmdoc_pages(rmdoc_bytes)]
+
+
+def parse_rmdoc_pages(rmdoc_bytes: bytes) -> list[ParsedPage]:
+    """
+    Parse all pages from an .rmdoc archive, including typed text when present.
+
+    Returns:
+        A list of :class:`ParsedPage` objects in notebook page order.
+    """
     metadata = extract_metadata(rmdoc_bytes)
     page_ids: list[str] = metadata["pages"]
     doc_uuid: str = metadata["doc_uuid"]
@@ -372,7 +422,7 @@ def parse_rmdoc(rmdoc_bytes: bytes) -> list[list[dict]]:
         logger.warning("No pages found in document (doc_uuid=%s)", doc_uuid)
         return []
 
-    all_pages: list[list[dict]] = []
+    parsed_pages: list[ParsedPage] = []
 
     with _open_rmdoc(rmdoc_bytes) as zf:
         zip_names = set(zf.namelist())
@@ -385,18 +435,17 @@ def parse_rmdoc(rmdoc_bytes: bytes) -> list[list[dict]]:
                     rm_path = alt
                 else:
                     logger.debug("No .rm file for page %s", page_id)
-                    all_pages.append([])
+                    parsed_pages.append(ParsedPage(strokes=[], typed_text=""))
                     continue
 
             try:
                 rm_bytes = zf.read(rm_path)
             except Exception as exc:
                 logger.error("Failed to read %s from archive: %s", rm_path, exc)
-                all_pages.append([])
+                parsed_pages.append(ParsedPage(strokes=[], typed_text=""))
                 continue
 
-            strokes = _parse_strokes_from_rm_bytes(rm_bytes, page_id)
-            all_pages.append(strokes)
+            parsed_pages.append(_parse_page_from_rm_bytes(rm_bytes, page_id))
 
-    logger.info("Parsed %d page(s) for doc %s", len(all_pages), doc_uuid or "(unknown)")
-    return all_pages
+    logger.info("Parsed %d page(s) for doc %s", len(parsed_pages), doc_uuid or "(unknown)")
+    return parsed_pages

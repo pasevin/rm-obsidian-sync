@@ -32,6 +32,7 @@ Obsidian    Obsidian
 3. Each inked page rendered to PNG via a custom Cairo-based stroke renderer
 4. Handwriting recognised via **LLM vision** (OpenRouter, free tier) → Tesseract fallback
 5. Markdown note written to `<VAULT_RM_ROOT>/<Notebook Name>/` with embedded page images
+   (blank pages are omitted and fully empty notebooks are skipped by default)
 6. **Deletions propagate** — if a notebook is deleted on the tablet, the corresponding vault directory is removed on the next poll cycle (see [Deletion behaviour](#deletion-behaviour))
 
 ### Obsidian → reMarkable
@@ -181,6 +182,7 @@ All settings live in `.env` (copy from `.env.example`):
 | `RMFAKECLOUD_DATA_PATH` | ✓ | `~/rmfakecloud/data` | Absolute path to rmfakecloud data directory |
 | `VAULT_PATH` | ✓ | `~/vault` | Absolute path to Obsidian vault root |
 | `VAULT_RM_ROOT` | — | `Inbox/reMarkable` | Sub-path for reMarkable notes inside vault |
+| `SKIP_EMPTY_NOTEBOOKS` | — | `1` | When enabled, omit blank pages and skip writing notebooks with no strokes and no text |
 | `OPENROUTER_API_KEY` | ✓ | — | OpenRouter key for LLM vision HWR |
 | `LLM_VISION_MODEL` | — | `nvidia/nemotron-nano-12b-vl:free` | OpenRouter model for HWR |
 | `WEBHOOK_PORT` | — | `9090` | Daemon listen port |
@@ -239,6 +241,27 @@ Notes under `Inbox/reMarkable/` and `_templates/` are always excluded.
 
 ---
 
+## Empty notebook handling
+
+By default, `SKIP_EMPTY_NOTEBOOKS=1` keeps clutter out of the vault by skipping
+notebooks that have no real content.
+
+A page is treated as empty only when it has **no pen strokes** and **no text**:
+no typed text embedded in the reMarkable page, and no recognised handwriting
+output produced from that page.
+
+With the option enabled:
+
+- blank pages inside otherwise non-empty notebooks are omitted from the Markdown note
+- a notebook with no remaining non-empty pages is recorded in sync state but no `.md` file is written
+- if a previously synced notebook later becomes empty, the existing vault note is left untouched
+- if a skipped notebook later gets strokes or text, it syncs normally on the next change
+
+Set `SKIP_EMPTY_NOTEBOOKS=0` in `.env` if you want the previous behaviour and
+prefer every notebook to be written regardless of content.
+
+---
+
 ## Deletion behaviour
 
 When you delete a notebook on the tablet, the poll loop detects the missing document on the next cycle and removes the corresponding vault directory. There are two cases:
@@ -292,6 +315,28 @@ systemctl --user status rm-obsidian-sync
 
 # Restart after config change
 systemctl --user restart rm-obsidian-sync
+```
+
+## Redeploying on the VPS
+
+The systemd user service in `deploy/rm-obsidian-sync.service` runs `uvicorn`
+from this repo's `.venv`, so code and config changes are picked up from the
+checked-out repository.
+
+```bash
+# Pull the latest code
+cd ~/rm-obsidian-sync
+git pull
+
+# Reinstall if dependencies or the service definition changed
+./install.sh
+
+# Restart to pick up code or .env changes
+systemctl --user restart rm-obsidian-sync
+
+# Verify the daemon came back cleanly
+systemctl --user status rm-obsidian-sync
+journalctl --user -u rm-obsidian-sync -f
 ```
 
 ---
